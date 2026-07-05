@@ -2,6 +2,7 @@
 # requires-python = ">=3.13"
 # dependencies = [
 #     "marimo>=0.23.13",
+#     "gsplat==1.5.3",
 #     "matplotlib==3.11.0",
 #     "numpy==2.5.1",
 #     "plyfile==1.1.4",
@@ -35,19 +36,21 @@ def claude_status(mo):
 
 
 @app.cell
-def hyperparams(mo):
+def hyperparams(mo, torch):
     F_DIM = 32
     K = 10
-    VOXEL_SIZE = 0.4
+    VOXEL_SIZE = 2.0
     LR = 1e-2
-    N_ITERS = 800
+    N_ITERS = 15000
     OPACITY_THRESHOLD = 0.005
-    RENDER_SIZE = 48
-    N_VIEWS = 10
+    RENDER_SIZE = 96
+    N_VIEWS = 16
+    SUBSAMPLE_N = 30000
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     mo.md(
         f"""
         **Hyperparameters**
-    
+
 
         - Anchor feature dim `F_DIM` = {F_DIM}
         - Neighbors per anchor `K` = {K}
@@ -56,10 +59,13 @@ def hyperparams(mo):
         - Training iterations = {N_ITERS}
         - Final opacity threshold = {OPACITY_THRESHOLD}
         - Render resolution = {RENDER_SIZE}x{RENDER_SIZE}, {N_VIEWS} synthetic views
+        - Real-data subsample count = {SUBSAMPLE_N}
+        - Device = `{DEVICE}`
         """
     )
 
     return (
+        DEVICE,
         F_DIM,
         K,
         LR,
@@ -67,6 +73,7 @@ def hyperparams(mo):
         N_VIEWS,
         OPACITY_THRESHOLD,
         RENDER_SIZE,
+        SUBSAMPLE_N,
         VOXEL_SIZE,
     )
 
@@ -75,25 +82,33 @@ def hyperparams(mo):
 def synthetic_data(gsa, mo):
     gaussians = gsa.make_synthetic_gaussians(n=800, seed=0)
     mo.md(f"Synthetic scene: **{len(gaussians)}** Gaussians.")
-
     return (gaussians,)
 
 
 @app.cell
 def ply_loader(mo):
-    ply_path = mo.ui.text(label="Path to a real trained-3DGS .ply (optional)", value="")
+    ply_path = mo.ui.text(label="Path to a real trained-3DGS .ply (optional)", value="/marimo/data/truck_point_cloud.ply")
     ply_path
 
     return (ply_path,)
 
 
 @app.cell
-def active_gaussians_selector(gaussians, gsa, mo, ply_path):
-    if ply_path.value.strip():
-        active_gaussians = gsa.load_ply_gaussians(ply_path.value.strip())
-        _source = f"loaded from `{ply_path.value.strip()}`"
+def active_gaussians_selector(
+    DEVICE,
+    SUBSAMPLE_N,
+    gaussians,
+    gsa,
+    mo,
+    ply_path,
+):
+    _path = ply_path.value.strip() or "/marimo/data/truck_point_cloud.ply"
+    if _path:
+        _loaded = gsa.load_ply_gaussians(_path)
+        active_gaussians = gsa.subsample_gaussians(_loaded, SUBSAMPLE_N, mode="topk_opacity").to(DEVICE)
+        _source = f"loaded from `{_path}` ({len(_loaded)} -> {len(active_gaussians)} after subsample)"
     else:
-        active_gaussians = gaussians
+        active_gaussians = gaussians.to(DEVICE)
         _source = "synthetic"
 
     mo.md(f"Active scene: **{len(active_gaussians)}** Gaussians ({_source}).")
@@ -109,7 +124,6 @@ def anchors(F_DIM, K, VOXEL_SIZE, active_gaussians, gsa, mo):
         f"Built **{len(anchors)}** anchors from {len(active_gaussians)} Gaussians "
         f"(voxel size {VOXEL_SIZE}). Neighbor-slot coverage at init: {_coverage:.1%}."
     )
-
     return (anchors,)
 
 
@@ -133,19 +147,18 @@ def cameras_and_targets(
         target_renders = [gsa.render(active_gaussians, cam) for cam in cameras]
 
     mo.md(f"Generated **{len(cameras)}** synthetic cameras and precomputed target renders.")
-
     return CANONICAL_DISTANCE, camera_view_dirs, cameras, target_renders
 
 
 @app.cell
-def models(F_DIM, K, gsa, mo):
-    opacity_mlp = gsa.OpacityMLP(F_DIM, K)
-    color_mlp = gsa.ColorMLP(F_DIM, K)
-    cov_mlp = gsa.CovMLP(F_DIM, K)
+def models(DEVICE, F_DIM, K, gsa, mo):
+    opacity_mlp = gsa.OpacityMLP(F_DIM, K).to(DEVICE)
+    color_mlp = gsa.ColorMLP(F_DIM, K).to(DEVICE)
+    cov_mlp = gsa.CovMLP(F_DIM, K).to(DEVICE)
 
     mo.md(
         f"Instantiated `opacity_mlp`, `color_mlp`, `cov_mlp` "
-        f"(feature dim {F_DIM}, {K} neighbors per anchor)."
+        f"(feature dim {F_DIM}, {K} neighbors per anchor) on `{DEVICE}`."
     )
 
     return color_mlp, cov_mlp, opacity_mlp
@@ -172,13 +185,13 @@ def training_loop(
         CANONICAL_DISTANCE, N_ITERS, LR,
     )
     mo.md(f"Training done. Final loss: **{loss_history[-1]:.5f}** (started at {loss_history[0]:.5f}).")
-
     return (loss_history,)
 
 
 @app.cell
 def final_decode(
     CANONICAL_DISTANCE,
+    DEVICE,
     K,
     OPACITY_THRESHOLD,
     anchors,
@@ -189,7 +202,7 @@ def final_decode(
     opacity_mlp,
     torch,
 ):
-    CANONICAL_VIEW_DIR = torch.tensor([0.0, 0.0, 1.0])
+    CANONICAL_VIEW_DIR = torch.tensor([0.0, 0.0, 1.0], device=DEVICE)
 
     with torch.no_grad():
         reconstructed = gsa.decode_to_gaussians(
@@ -235,7 +248,6 @@ def verification_metrics(
         mo.md("### Round-trip verification"),
         mo.ui.table([{"metric": k, "value": f"{v:.4f}" if isinstance(v, float) else v} for k, v in metrics.items()]),
     ])
-
     return
 
 
@@ -255,19 +267,19 @@ def visualization(
         fig = plt.figure(figsize=(11, 6))
 
         ax1 = fig.add_subplot(2, 3, 1, projection="3d")
-        orig_pos = original.positions.detach().numpy()
-        orig_col = torch.sigmoid(original.sh_dc).detach().numpy()
+        orig_pos = original.positions.detach().cpu().numpy()
+        orig_col = original.sh_dc.clamp(0, 1).detach().cpu().numpy()
         ax1.scatter(orig_pos[:, 0], orig_pos[:, 1], orig_pos[:, 2], c=orig_col, s=4)
         ax1.set_title("Original (standard 3DGS)")
 
         ax2 = fig.add_subplot(2, 3, 2, projection="3d")
-        recon_pos = reconstructed.positions.detach().numpy()
-        recon_col = torch.sigmoid(reconstructed.sh_dc).detach().numpy()
+        recon_pos = reconstructed.positions.detach().cpu().numpy()
+        recon_col = reconstructed.sh_dc.clamp(0, 1).detach().cpu().numpy()
         ax2.scatter(recon_pos[:, 0], recon_pos[:, 1], recon_pos[:, 2], c=recon_col, s=4)
         ax2.set_title("Reconstructed (from anchors)")
 
         ax3 = fig.add_subplot(2, 3, 3, projection="3d")
-        anchor_pos = anchors.anchor_positions.detach().numpy()
+        anchor_pos = anchors.anchor_positions.detach().cpu().numpy()
         ax3.scatter(anchor_pos[:, 0], anchor_pos[:, 1], anchor_pos[:, 2], c="gray", s=8)
         ax3.set_title(f"Anchors (M={len(anchors)})")
 
@@ -277,14 +289,14 @@ def visualization(
         ax4.set_xlabel("iteration")
 
         ax5 = fig.add_subplot(2, 3, 5)
-        ax5.imshow(target_renders[0].detach().numpy())
+        ax5.imshow(target_renders[0].detach().cpu().numpy())
         ax5.set_title("Target render (view 0)")
         ax5.axis("off")
 
         ax6 = fig.add_subplot(2, 3, 6)
         with torch.no_grad():
             recon_view0 = gsa.render(reconstructed, cameras[0])
-        ax6.imshow(recon_view0.detach().numpy())
+        ax6.imshow(recon_view0.detach().cpu().numpy())
         ax6.set_title("Reconstructed render (view 0)")
         ax6.axis("off")
 

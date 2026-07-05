@@ -61,18 +61,25 @@ def decode_to_gaussians(
     soft-opacity candidates so the photometric loss can shape them via
     compositing. `hard_filter=True` (final structured->standard decode)
     drops near-zero-opacity candidates, matching the paper's pruning."""
+    device = anchors.anchor_positions.device
     M = len(anchors)
     k = anchors.anchor_offsets.shape[1]
     scaling = anchors.anchor_scaling.clamp_min(1e-4)
     view_dir = view_dir / view_dir.norm()
     view_dir_b = view_dir.view(1, 3).expand(M, 3)
-    distance_b = torch.full((M, 1), float(distance))
+    distance_b = torch.full((M, 1), float(distance), device=device)
     mlp_in = torch.cat([anchors.anchor_features, view_dir_b, distance_b], dim=-1)
 
     opacity_logits = opacity_mlp(mlp_in)               # [M,K]
     color = color_mlp(mlp_in).view(M, k, 3)             # [M,K,3]
     cov_out = cov_mlp(mlp_in).view(M, k, 7)             # [M,K,7]
-    scale_offset = cov_out[..., :3]
+    # Clamp in log-space to +-3 (~0.05x-20x the anchor's own base scale).
+    # Nothing else constrains predicted scale -- without this, a neighbor
+    # candidate can drift to an enormous scale during training (still low
+    # loss under soft compositing, since it's usually occluded by other
+    # candidates) and then dominate the frame once hard-filtered at decode
+    # time, when those occluding candidates get pruned away.
+    scale_offset = cov_out[..., :3].clamp(-3.0, 3.0)
     quat_offset = cov_out[..., 3:7]
 
     positions = anchors.anchor_positions.unsqueeze(1) + anchors.anchor_offsets * scaling.unsqueeze(1)
@@ -86,7 +93,7 @@ def decode_to_gaussians(
     rotations = rotations.reshape(n, 4)
     opacities = opacities.reshape(n, 1)
     sh_dc = color.reshape(n, 3)
-    sh_rest = torch.zeros(n, 45)
+    sh_rest = torch.zeros(n, 45, device=device)
 
     if hard_filter:
         keep = torch.sigmoid(opacities.squeeze(-1)) > threshold

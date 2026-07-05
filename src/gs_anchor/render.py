@@ -1,54 +1,85 @@
+"""Rendering via gsplat (https://github.com/nerfstudio-project/gsplat) --
+real tile-based CUDA rasterization with full anisotropic 3D covariance
+(uses `rotations`, not a simplified isotropic approximation).
+
+gsplat JIT-compiles its CUDA extension on first import. In a sandbox that
+assembles CUDA from pip `nvidia-*` packages rather than a system CUDA
+toolkit install, `CUDA_HOME`/`PATH` must point at the `nvidia/cu*` package
+directory *before* gsplat is imported -- `_ensure_cuda_home()` below does
+this automatically by locating the installed `nvidia` package's directory
+and finding `cu*/bin/nvcc` inside it. No manual environment setup needed.
+
+Once compiled, both forward and backward (training) work correctly,
+confirmed on an NVIDIA RTX PRO 6000 Blackwell (compute capability 12.0).
+"""
+
+import math
+import os
+import glob
+import importlib.util
+
+
+def _ensure_cuda_home() -> None:
+    if os.environ.get("CUDA_HOME"):
+        return
+    spec = importlib.util.find_spec("nvidia")
+    if spec is None or not spec.submodule_search_locations:
+        return
+    for base in spec.submodule_search_locations:
+        for cu_dir in glob.glob(os.path.join(base, "cu*")):
+            nvcc = os.path.join(cu_dir, "bin", "nvcc")
+            if os.path.exists(nvcc):
+                os.environ["CUDA_HOME"] = cu_dir
+                os.environ["PATH"] = os.path.join(cu_dir, "bin") + os.pathsep + os.environ.get("PATH", "")
+                return
+
+
+_ensure_cuda_home()
+
 import torch
+import gsplat
 
 from .gaussians import Camera, GaussianCloud
 
 
 def render(gaussians: GaussianCloud, camera: Camera) -> torch.Tensor:
-    """Differentiable, pure-PyTorch renderer: perspective-project each
-    Gaussian, give it an isotropic image-space footprint (simplification --
-    no anisotropic 2D-covariance/Jacobian projection), and alpha-composite
-    front-to-back via cumulative transmittance. Returns an [H,W,3] image."""
-    positions = gaussians.positions
-    p_cam = positions @ camera.R.T + camera.t
-    z = p_cam[:, 2].clamp_min(1e-3)
-    x_img = camera.focal * p_cam[:, 0] / z + camera.principal[0]
-    y_img = camera.focal * p_cam[:, 1] / z + camera.principal[1]
+    """Render an [H,W,3] image via gsplat's tile-based CUDA rasterizer."""
+    device = gaussians.positions.device
 
-    mean_scale = torch.exp(gaussians.scales).mean(dim=-1)
-    radius_px = (camera.focal * mean_scale / z).clamp_min(0.5)
+    means = gaussians.positions
+    quats = gaussians.rotations / gaussians.rotations.norm(dim=-1, keepdim=True)
+    scales = torch.exp(gaussians.scales)
+    opacities = torch.sigmoid(gaussians.opacities.squeeze(-1))
+    colors = gaussians.sh_dc.clamp(0.0, 1.0)
 
-    opacity = torch.sigmoid(gaussians.opacities.squeeze(-1))
-    color = torch.sigmoid(gaussians.sh_dc)
+    viewmat = torch.zeros(4, 4, device=device)
+    viewmat[:3, :3] = camera.R
+    viewmat[:3, 3] = camera.t
+    viewmat[3, 3] = 1.0
 
-    ys, xs = torch.meshgrid(
-        torch.arange(camera.H, dtype=torch.float32),
-        torch.arange(camera.W, dtype=torch.float32),
-        indexing="ij",
+    K = torch.zeros(3, 3, device=device)
+    K[0, 0] = camera.focal
+    K[1, 1] = camera.focal
+    K[0, 2] = camera.principal[0]
+    K[1, 2] = camera.principal[1]
+    K[2, 2] = 1.0
+
+    render_colors, _render_alphas, _meta = gsplat.rasterization(
+        means, quats, scales, opacities, colors,
+        viewmat[None], K[None],
+        width=camera.W, height=camera.H,
+        sh_degree=None,
     )
-    dx = xs.unsqueeze(0) - x_img.view(-1, 1, 1)
-    dy = ys.unsqueeze(0) - y_img.view(-1, 1, 1)
-    dist2 = dx * dx + dy * dy
-    alpha = opacity.view(-1, 1, 1) * torch.exp(-0.5 * dist2 / (radius_px.view(-1, 1, 1) ** 2))
-
-    order = torch.argsort(z)
-    alpha_sorted = alpha[order]
-    color_sorted = color[order]
-
-    transmittance = torch.cumprod(
-        torch.cat([torch.ones(1, camera.H, camera.W), 1 - alpha_sorted + 1e-10], dim=0),
-        dim=0,
-    )[:-1]
-    weight = transmittance * alpha_sorted
-    image = torch.einsum("nhw,nc->hwc", weight, color_sorted)
-    return image.clamp(0.0, 1.0)
+    return render_colors[0].clamp(0.0, 1.0)
 
 
 def look_at_camera(eye: torch.Tensor, target: torch.Tensor, focal: float, size: int) -> Camera:
+    device = eye.device
     forward = (target - eye)
     forward = forward / forward.norm()
-    up_hint = torch.tensor([0.0, 1.0, 0.0])
+    up_hint = torch.tensor([0.0, 1.0, 0.0], device=device)
     if torch.abs(torch.dot(forward, up_hint)) > 0.99:
-        up_hint = torch.tensor([1.0, 0.0, 0.0])
+        up_hint = torch.tensor([1.0, 0.0, 0.0], device=device)
     right = torch.linalg.cross(forward, up_hint)
     right = right / right.norm()
     up = torch.linalg.cross(right, forward)
@@ -59,16 +90,17 @@ def look_at_camera(eye: torch.Tensor, target: torch.Tensor, focal: float, size: 
 
 
 def make_synthetic_cameras(centroid: torch.Tensor, radius: float, n_views: int, size: int):
+    device = centroid.device
     cams = []
     dirs_list = []
-    golden_angle = torch.pi * (3.0 - 5.0 ** 0.5)
+    golden_angle = math.pi * (3.0 - 5.0 ** 0.5)
     for i in range(n_views):
         yy = 1 - 2 * (i / max(n_views - 1, 1))
         r = (1 - yy * yy) ** 0.5
         theta = golden_angle * i
-        x = torch.cos(torch.tensor(theta)) * r
-        z = torch.sin(torch.tensor(theta)) * r
-        d = torch.tensor([x, yy, z])
+        x = math.cos(theta) * r
+        z = math.sin(theta) * r
+        d = torch.tensor([x, yy, z], device=device)
         eye = centroid + radius * d
         cams.append(look_at_camera(eye, centroid, focal=1.2 * size, size=size))
         dirs_list.append(-d)
