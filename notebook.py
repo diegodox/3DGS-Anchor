@@ -31,7 +31,7 @@ def hyperparams():
     N_ITERS = 3000
     OPACITY_THRESHOLD = 0.005
     RENDER_SIZE = 96
-    N_VIEWS = 16
+    N_CANDIDATES = 24
     SUBSAMPLE_N = 30000
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     mo.md(
@@ -45,18 +45,20 @@ def hyperparams():
         - Learning rate = {LR}
         - Training iterations = {N_ITERS}
         - Final opacity threshold = {OPACITY_THRESHOLD}
-        - Render resolution = {RENDER_SIZE}x{RENDER_SIZE}, {N_VIEWS} synthetic views
+        - Render resolution = {RENDER_SIZE}x{RENDER_SIZE}
+        - Candidate camera views to generate = {N_CANDIDATES}
         - Real-data subsample count = {SUBSAMPLE_N}
         - Device = `{DEVICE}`
         """
     )
+
     return (
         DEVICE,
         F_DIM,
         K,
         LR,
+        N_CANDIDATES,
         N_ITERS,
-        N_VIEWS,
         OPACITY_THRESHOLD,
         RENDER_SIZE,
         SUBSAMPLE_N,
@@ -105,18 +107,24 @@ def anchors(F_DIM, K, VOXEL_SIZE, active_gaussians):
 
 
 @app.cell
-def cameras_and_targets(N_VIEWS, RENDER_SIZE, active_gaussians):
-    _scene_centroid = active_gaussians.positions.mean(dim=0)
-    _scene_radius = 3.0 * active_gaussians.positions.std(dim=0).norm().clamp_min(0.5)
-    cameras, camera_view_dirs = gsa.make_synthetic_cameras(
-        _scene_centroid, _scene_radius, N_VIEWS, RENDER_SIZE
-    )
-    CANONICAL_DISTANCE = float(_scene_radius)
+def cameras_and_targets(
+    camera_checkboxes,
+    candidate_cameras,
+    candidate_dirs,
+    candidate_dists,
+    candidate_imgs,
+):
+    _selected = [i for i, v in enumerate(camera_checkboxes.value) if v]
+    if not _selected:
+        _selected = list(range(len(candidate_imgs)))
 
-    with torch.no_grad():
-        target_renders = [gsa.render(active_gaussians, cam) for cam in cameras]
+    cameras = [candidate_cameras[i] for i in _selected]
+    camera_view_dirs = torch.stack([candidate_dirs[i] for i in _selected])
+    target_renders = [candidate_imgs[i] for i in _selected]
+    CANONICAL_DISTANCE = float(torch.stack([candidate_dists[i] for i in _selected]).mean())
 
-    mo.md(f"Generated **{len(cameras)}** synthetic cameras and precomputed target renders.")
+    mo.md(f"Using **{len(cameras)}** selected camera(s) ({len(candidate_imgs)} candidates offered).")
+
     return CANONICAL_DISTANCE, camera_view_dirs, cameras, target_renders
 
 
@@ -142,16 +150,20 @@ def training_loop(
     camera_view_dirs,
     cameras,
     color_mlp,
+    confirm_btn,
     cov_mlp,
     opacity_mlp,
     target_renders,
 ):
+    mo.stop(not confirm_btn.value, mo.md("Tick your chosen camera views above, then click **Confirm camera selection & continue** to train."))
+
     loss_history = gsa.train(
         anchors, opacity_mlp, color_mlp, cov_mlp,
         cameras, camera_view_dirs, target_renders,
         CANONICAL_DISTANCE, N_ITERS, LR,
     )
     mo.md(f"Training done. Final loss: **{loss_history[-1]:.5f}** (started at {loss_history[0]:.5f}).")
+
     return (loss_history,)
 
 
@@ -163,9 +175,12 @@ def final_decode(
     OPACITY_THRESHOLD,
     anchors,
     color_mlp,
+    confirm_btn,
     cov_mlp,
     opacity_mlp,
 ):
+    mo.stop(not confirm_btn.value)
+
     CANONICAL_VIEW_DIR = torch.tensor([0.0, 0.0, 1.0], device=DEVICE)
 
     with torch.no_grad():
@@ -180,6 +195,7 @@ def final_decode(
         f"`{CANONICAL_VIEW_DIR.tolist()}`): **{len(reconstructed)}** Gaussians "
         f"survive the opacity threshold (from {len(anchors) * K} candidates)."
     )
+
     return (reconstructed,)
 
 
@@ -264,6 +280,49 @@ def visualization(
 
     plot_comparison(active_gaussians, reconstructed, anchors, cameras, target_renders, loss_history)
     return
+
+
+@app.cell
+def camera_candidates(N_CANDIDATES, RENDER_SIZE, active_gaussians):
+    candidate_cameras, candidate_dirs, candidate_dists = gsa.make_random_cameras(
+        active_gaussians.positions, N_CANDIDATES, RENDER_SIZE, seed=0
+    )
+    with torch.no_grad():
+        candidate_imgs = [gsa.render(active_gaussians, cam) for cam in candidate_cameras]
+
+    mo.md(f"Rendered **{len(candidate_cameras)}** candidate views for manual selection.")
+
+    return candidate_cameras, candidate_dirs, candidate_dists, candidate_imgs
+
+
+@app.cell
+def camera_picker_ui(candidate_imgs):
+    def _thumb(img):
+        fig, ax = plt.subplots(figsize=(1.4, 1.4))
+        ax.imshow(img.detach().cpu().numpy())
+        ax.axis("off")
+        plt.close(fig)
+        return fig
+
+    camera_checkboxes = mo.ui.array(
+        [mo.ui.checkbox(label=f"#{i}") for i in range(len(candidate_imgs))]
+    )
+    _cells = [
+        mo.vstack([_thumb(img), camera_checkboxes[i]])
+        for i, img in enumerate(candidate_imgs)
+    ]
+    _rows = [mo.hstack(_cells[i:i + 6]) for i in range(0, len(_cells), 6)]
+    mo.vstack([mo.md("Tick the views that show the scene well:"), *_rows])
+
+    return (camera_checkboxes,)
+
+
+@app.cell
+def confirm_selection():
+    confirm_btn = mo.ui.run_button(label="Confirm camera selection & continue")
+    confirm_btn
+
+    return (confirm_btn,)
 
 
 if __name__ == "__main__":

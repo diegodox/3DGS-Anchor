@@ -2,7 +2,7 @@ from .anchors import build_anchors
 from .gaussians import AnchorCloud, Camera, GaussianCloud, make_synthetic_gaussians, subsample_gaussians
 from .model import ColorMLP, CovMLP, OpacityMLP, decode_to_gaussians
 from .ply_io import load_ply_gaussians
-from .render import look_at_camera, make_synthetic_cameras, render
+from .render import look_at_camera, make_random_cameras, make_synthetic_cameras, render
 from .train import photometric_error_stats, train
 
 __all__ = [
@@ -16,6 +16,7 @@ __all__ = [
     "render",
     "look_at_camera",
     "make_synthetic_cameras",
+    "make_random_cameras",
     "OpacityMLP",
     "ColorMLP",
     "CovMLP",

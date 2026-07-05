@@ -105,3 +105,33 @@ def make_synthetic_cameras(centroid: torch.Tensor, radius: float, n_views: int, 
         cams.append(look_at_camera(eye, centroid, focal=1.2 * size, size=size))
         dirs_list.append(-d)
     return cams, torch.stack(dirs_list)
+
+
+def make_random_cameras(positions: torch.Tensor, n_views: int, size: int, seed: int = 0):
+    """Diverse candidate cameras for manual selection: random look-at
+    target (mix of the scene centroid and actual sampled points, to hedge
+    against a spread-out real scene's "center of interest" not being the
+    statistical centroid), random direction, and random distance -- unlike
+    make_synthetic_cameras's fixed-radius orbit, since a single heuristic
+    radius doesn't reliably frame real, non-uniform scenes. Returns
+    (cameras, camera_view_dirs, camera_distances)."""
+    device = positions.device
+    g = torch.Generator().manual_seed(seed)  # CPU generator; move samples to device after
+    centroid = positions.mean(dim=0)
+    base_scale = positions.std(dim=0).norm().clamp_min(0.5).cpu()
+
+    idx = torch.randint(0, positions.shape[0], (n_views,), generator=g)
+    point_targets = positions[idx.to(device)]
+    use_centroid = torch.rand(n_views, generator=g) < 0.5
+    dirs = torch.randn(n_views, 3, generator=g)
+    dirs = (dirs / dirs.norm(dim=-1, keepdim=True)).to(device)
+    dist_scale = (base_scale * (0.4 + 2.1 * torch.rand(n_views, generator=g))).to(device)
+
+    cams, dirs_out, dists_out = [], [], []
+    for i in range(n_views):
+        target = centroid if use_centroid[i] else point_targets[i]
+        eye = target + dist_scale[i] * dirs[i]
+        cams.append(look_at_camera(eye, target, focal=1.2 * size, size=size))
+        dirs_out.append(-dirs[i])
+        dists_out.append(dist_scale[i])
+    return cams, torch.stack(dirs_out), torch.stack(dists_out)
