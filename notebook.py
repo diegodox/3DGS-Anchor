@@ -8,6 +8,14 @@ app = marimo.App(width="medium")
 def _():
     import marimo as mo
 
+    return (mo,)
+
+
+@app.cell
+def claude_status(mo):
+    mo.md("""
+    **Claude connected** 🤝 — ready to pair on this notebook.
+    """)
     return
 
 
