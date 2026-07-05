@@ -19,13 +19,17 @@ direction:
 
 - `scripts/sync-notebook.py` (**pull**): fetches the live session's backing
   file, diffs it cell-by-cell against the local notebook, and applies
-  new/changed `@app.cell` bodies into the local file automatically. It
-  deliberately leaves the file's header (`import marimo`, `__generated_with`,
-  `app = marimo.App(...)`) and footer (`if __name__ == "__main__": app.run()`)
-  untouched, since the live session's copy of those often carries
-  sandbox-only config (e.g. a `css_file` path or `__generated_with` version
-  that only makes sense inside that container) — any difference there is
-  printed for manual review, never auto-applied.
+  new/changed `@app.cell` bodies into the local file automatically. A
+  `with app.setup:` block (marimo's shared-imports construct, if present)
+  is diffed and applied the same way, as its own pseudo-cell — it is not
+  swallowed into the untouched header just because it sits above the first
+  `@app.cell`. The driver deliberately leaves the file's actual header
+  (`import marimo`, `__generated_with`, `app = marimo.App(...)`) and footer
+  (`if __name__ == "__main__": app.run()`) untouched, since the live
+  session's copy of those often carries sandbox-only config (e.g. a
+  `css_file` path or `__generated_with` version that only makes sense
+  inside that container) — any difference there is printed for manual
+  review, never auto-applied.
 - `scripts/push-package.py` (**push**): writes a local package's `.py` files
   into the live sandbox as a sibling directory next to its notebook file
   (e.g. `gs_anchor/` next to `/marimo/notebook.py`), so `import gs_anchor`
@@ -79,7 +83,9 @@ NOT applied -- review this manually (sandbox-only config, e.g. App(...) kwargs, 
 `~ CHANGED cell applied: ...` lines mean an existing cell's body differed
 and was replaced wholesale. `! REMOVED_UPSTREAM: ...` means a cell exists
 locally but not in the live session — it is flagged, never deleted
-automatically.
+automatically. A `+ NEW setup block applied: app.setup` or
+`~ CHANGED setup block applied: app.setup` line means the live session's
+`with app.setup:` block was new or different and got applied the same way.
 
 ## Push (agent path)
 
@@ -137,6 +143,10 @@ Once it reports applied changes:
   matched by their ordinal position among other `_`-named cells, not by
   name — reordering anonymous cells between local and remote can cause a
   false CHANGED/NEW match. Rename a cell if you need to track it reliably.
+- A `with app.setup:` block is matched as a single whole-block pseudo-cell
+  (key `__setup__`) — there's no per-statement diffing inside it. If only
+  one import in a large setup block changed, the whole block still gets
+  replaced wholesale, same as any other changed cell.
 - A push does not refresh an already-imported package in the live kernel —
   Python caches modules on first import, so a kernel that already ran
   `import gs_anchor` keeps using the old code until restarted, even though

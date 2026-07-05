@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Pull @app.cell changes from a live molab-hosted marimo session into a
-git-tracked notebook file.
+"""Pull @app.cell (and app.setup) changes from a live molab-hosted marimo
+session into a git-tracked notebook file.
 
 Fetches the live session's backing file from its own sandbox filesystem
 (via marimo-pair's execute-code.sh), diffs it cell-by-cell against the
 local file, and applies new/changed cell bodies -- never touching the
 local file's header (imports, __generated_with, app = marimo.App(...))
 or footer (if __name__ ... block), since those can carry sandbox-only
-config that shouldn't leak into git.
+config that shouldn't leak into git. A `with app.setup:` block (marimo's
+shared-imports construct, if present) is treated like a cell -- diffed
+and applied/flagged on its own, not lumped into the untouched header.
 
 Usage:
   sync-notebook.py --url URL [--token TOKEN] [--notebook path] [--dry-run]
@@ -23,8 +25,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 CELL_BOUNDARY_RE = re.compile(r"^@app\.cell")
+SETUP_BOUNDARY_RE = re.compile(r"^with app\.setup\s*:")
 FOOTER_START_RE = re.compile(r"^if __name__")
 DEF_RE = re.compile(r"^\s*def\s+(\w+)\s*\(")
+
+SETUP_KEY = "__setup__"
+SETUP_NAME = "app.setup"
 
 
 @dataclass
@@ -34,16 +40,27 @@ class Cell:
     text: str
 
 
-def parse_notebook(src: str) -> tuple[str, list[Cell], str]:
+def parse_notebook(src: str) -> tuple[str, Cell | None, list[Cell], str]:
     lines = src.splitlines(keepends=True)
     n = len(lines)
-    i = 0
 
     header_end = 0
-    while header_end < n and not CELL_BOUNDARY_RE.match(lines[header_end]):
+    while (
+        header_end < n
+        and not CELL_BOUNDARY_RE.match(lines[header_end])
+        and not SETUP_BOUNDARY_RE.match(lines[header_end])
+    ):
         header_end += 1
     header = "".join(lines[:header_end])
     i = header_end
+
+    setup_cell: Cell | None = None
+    if i < n and SETUP_BOUNDARY_RE.match(lines[i]):
+        start = i
+        i += 1
+        while i < n and not CELL_BOUNDARY_RE.match(lines[i]) and not FOOTER_START_RE.match(lines[i]):
+            i += 1
+        setup_cell = Cell(key=SETUP_KEY, name=SETUP_NAME, text="".join(lines[start:i]))
 
     cells: list[Cell] = []
     anon_counter = 0
@@ -65,7 +82,7 @@ def parse_notebook(src: str) -> tuple[str, list[Cell], str]:
         cells.append(Cell(key=key, name=name, text=text))
 
     footer = "".join(lines[i:])
-    return header, cells, footer
+    return header, setup_cell, cells, footer
 
 
 def fetch_remote_source(execute_code_sh: Path, url: str, token: str | None, basename: str) -> str:
@@ -166,8 +183,8 @@ def main() -> None:
     local_src = notebook_path.read_text()
     remote_src = fetch_remote_source(execute_code_sh, args.url, args.token, notebook_path.name)
 
-    local_header, local_cells, local_footer = parse_notebook(local_src)
-    remote_header, remote_cells, remote_footer = parse_notebook(remote_src)
+    local_header, local_setup, local_cells, local_footer = parse_notebook(local_src)
+    remote_header, remote_setup, remote_cells, remote_footer = parse_notebook(remote_src)
 
     local_by_key = {c.key: c for c in local_cells}
     remote_by_key = {c.key: c for c in remote_cells}
@@ -178,7 +195,13 @@ def main() -> None:
     ]
     removed_keys = [c.key for c in local_cells if c.key not in remote_by_key]
 
-    if not new_keys and not changed_keys:
+    setup_is_new = remote_setup is not None and local_setup is None
+    setup_is_changed = (
+        remote_setup is not None and local_setup is not None and local_setup.text != remote_setup.text
+    )
+    setup_is_removed_upstream = remote_setup is None and local_setup is not None
+
+    if not new_keys and not changed_keys and not setup_is_new and not setup_is_changed:
         print("Nothing to apply -- local notebook already matches the live session's cells.")
     else:
         out_parts = []
@@ -189,8 +212,19 @@ def main() -> None:
             if c.key in new_keys:
                 out_parts.append(c.text)
 
-        new_src = local_header + "".join(out_parts) + local_footer
+        if setup_is_new or setup_is_changed:
+            setup_text = remote_setup.text
+        elif local_setup is not None:
+            setup_text = local_setup.text
+        else:
+            setup_text = ""
 
+        new_src = local_header + setup_text + "".join(out_parts) + local_footer
+
+        if setup_is_new:
+            print(f"+ NEW setup block applied: {SETUP_NAME}")
+        elif setup_is_changed:
+            print(f"~ CHANGED setup block applied: {SETUP_NAME}")
         for key in new_keys:
             print(f"+ NEW cell applied: {remote_by_key[key].name} ({key})")
         for key in changed_keys:
@@ -206,6 +240,11 @@ def main() -> None:
         print(
             f"! REMOVED_UPSTREAM: {local_by_key[key].name} ({key}) exists locally but not in the "
             "live session -- left in place, not deleted."
+        )
+    if setup_is_removed_upstream:
+        print(
+            f"! REMOVED_UPSTREAM: {SETUP_NAME} exists locally but not in the live session -- "
+            "left in place, not deleted."
         )
 
     if local_header != remote_header or local_footer != remote_footer:
