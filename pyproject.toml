@@ -11,6 +11,11 @@ dependencies = [
     "matplotlib==3.11.0",
     "plyfile==1.1.4",
     "gsplat==1.5.3",
+    "nvidia-cuda-nvcc==13.0.*",
+    "nvidia-cuda-cccl==13.0.*",
+    "nvidia-cuda-crt==13.0.*",
+    "nvidia-cuda-runtime==13.0.*",
+    "nvidia-nvvm==13.0.*",
 ]
 
 [build-system]

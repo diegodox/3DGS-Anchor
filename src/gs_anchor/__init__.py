@@ -1,5 +1,13 @@
 from .anchors import build_anchors
-from .gaussians import AnchorCloud, Camera, GaussianCloud, make_synthetic_gaussians, subsample_gaussians
+from .colmap_io import load_colmap_cameras
+from .gaussians import (
+    AnchorCloud,
+    Camera,
+    GaussianCloud,
+    crop_to_density_core,
+    make_synthetic_gaussians,
+    subsample_gaussians,
+)
 from .model import ColorMLP, CovMLP, OpacityMLP, decode_to_gaussians
 from .ply_io import load_ply_gaussians
 from .render import look_at_camera, make_random_cameras, make_synthetic_cameras, render
@@ -11,6 +19,8 @@ __all__ = [
     "Camera",
     "make_synthetic_gaussians",
     "subsample_gaussians",
+    "crop_to_density_core",
+    "load_colmap_cameras",
     "load_ply_gaussians",
     "build_anchors",
     "render",

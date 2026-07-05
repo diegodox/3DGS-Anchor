@@ -53,8 +53,8 @@ def render(gaussians: GaussianCloud, camera: Camera) -> torch.Tensor:
     colors = gaussians.sh_dc.clamp(0.0, 1.0)
 
     viewmat = torch.zeros(4, 4, device=device)
-    viewmat[:3, :3] = camera.R
-    viewmat[:3, 3] = camera.t
+    viewmat[:3, :3] = camera.R.to(device)
+    viewmat[:3, 3] = camera.t.to(device)
     viewmat[3, 3] = 1.0
 
     K = torch.zeros(3, 3, device=device)

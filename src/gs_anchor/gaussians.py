@@ -112,3 +112,39 @@ def subsample_gaussians(gaussians: GaussianCloud, n: int, mode: str = "topk_opac
         sh_dc=gaussians.sh_dc[idx],
         sh_rest=gaussians.sh_rest[idx],
     )
+
+
+def crop_to_density_core(
+    gaussians: GaussianCloud, voxel_size: float = 2.0, quantile: float = 0.9995, margin: float = 2.0
+) -> GaussianCloud:
+    """Crop to the densest contiguous region, found via voxel occupancy
+    counts. Real-world captures (e.g. a full street-level COLMAP scan) mix a
+    dense object of interest with a sparse, far-flung background/
+    environment; the object's local point density is far higher than the
+    background's, so thresholding voxel counts isolates it with no semantic
+    labels needed. Confirmed on the Tanks & Temples "truck" scan: the whole
+    capture spans ~180 units across an intersection, but the truck itself is
+    a ~4-unit-radius dense cluster -- a whole-cloud centroid/std treats the
+    sparse street network as part of the "object," which is why cameras and
+    subsampled points landed mostly off the truck entirely."""
+    positions = gaussians.positions
+    mins = positions.min(dim=0).values
+    idx = torch.floor((positions - mins) / voxel_size).long()
+    key = idx[:, 0] * 1_000_000 + idx[:, 1] * 1_000 + idx[:, 2]
+    _, inverse, counts = torch.unique(key, return_inverse=True, return_counts=True)
+
+    thresh = torch.quantile(counts.float(), quantile)
+    core_mask = (counts > thresh)[inverse]
+    core = positions[core_mask]
+    centroid = core.mean(dim=0)
+    radius = (core - centroid).norm(dim=-1).quantile(0.95) * margin
+
+    roi_idx = ((positions - centroid).norm(dim=-1) < radius).nonzero(as_tuple=True)[0]
+    return GaussianCloud(
+        positions=gaussians.positions[roi_idx],
+        scales=gaussians.scales[roi_idx],
+        rotations=gaussians.rotations[roi_idx],
+        opacities=gaussians.opacities[roi_idx],
+        sh_dc=gaussians.sh_dc[roi_idx],
+        sh_rest=gaussians.sh_rest[roi_idx],
+    )

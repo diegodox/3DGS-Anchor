@@ -5,6 +5,11 @@
 #     "gsplat==1.5.3",
 #     "matplotlib==3.11.0",
 #     "numpy==2.5.1",
+#     "nvidia-cuda-cccl==13.0.*",
+#     "nvidia-cuda-crt==13.0.*",
+#     "nvidia-cuda-nvcc==13.0.*",
+#     "nvidia-cuda-runtime==13.0.*",
+#     "nvidia-nvvm==13.0.*",
 #     "plyfile==1.1.4",
 #     "torch==2.12.1",
 # ]
@@ -51,7 +56,6 @@ def hyperparams():
         - Device = `{DEVICE}`
         """
     )
-
     return (
         DEVICE,
         F_DIM,
@@ -124,7 +128,6 @@ def cameras_and_targets(
     CANONICAL_DISTANCE = float(torch.stack([candidate_dists[i] for i in _selected]).mean())
 
     mo.md(f"Using **{len(cameras)}** selected camera(s) ({len(candidate_imgs)} candidates offered).")
-
     return CANONICAL_DISTANCE, camera_view_dirs, cameras, target_renders
 
 
@@ -163,7 +166,6 @@ def training_loop(
         CANONICAL_DISTANCE, N_ITERS, LR,
     )
     mo.md(f"Training done. Final loss: **{loss_history[-1]:.5f}** (started at {loss_history[0]:.5f}).")
-
     return (loss_history,)
 
 
@@ -195,7 +197,6 @@ def final_decode(
         f"`{CANONICAL_VIEW_DIR.tolist()}`): **{len(reconstructed)}** Gaussians "
         f"survive the opacity threshold (from {len(anchors) * K} candidates)."
     )
-
     return (reconstructed,)
 
 
@@ -283,15 +284,35 @@ def visualization(
 
 
 @app.cell
-def camera_candidates(N_CANDIDATES, RENDER_SIZE, active_gaussians):
-    candidate_cameras, candidate_dirs, candidate_dists = gsa.make_random_cameras(
-        active_gaussians.positions, N_CANDIDATES, RENDER_SIZE, seed=0
-    )
+def camera_candidates(
+    N_CANDIDATES,
+    RENDER_SIZE,
+    active_gaussians,
+    real_cameras,
+    real_view_dirs,
+):
+    import random as _random
+
+    if real_cameras is not None:
+        _rng = _random.Random(0)
+        _idx = _rng.sample(range(len(real_cameras)), min(N_CANDIDATES, len(real_cameras)))
+        candidate_cameras = [real_cameras[i] for i in _idx]
+        candidate_dirs = torch.stack([real_view_dirs[i] for i in _idx]).to(active_gaussians.positions.device)
+        _centroid_cpu = active_gaussians.positions.mean(dim=0).cpu()
+        candidate_dists = torch.stack([
+            (-cam.R.T @ cam.t - _centroid_cpu).norm() for cam in candidate_cameras
+        ])
+        _source = "real camera poses"
+    else:
+        candidate_cameras, candidate_dirs, candidate_dists = gsa.make_random_cameras(
+            active_gaussians.positions, N_CANDIDATES, RENDER_SIZE, seed=0
+        )
+        _source = "randomly generated"
+
     with torch.no_grad():
         candidate_imgs = [gsa.render(active_gaussians, cam) for cam in candidate_cameras]
 
-    mo.md(f"Rendered **{len(candidate_cameras)}** candidate views for manual selection.")
-
+    mo.md(f"Rendered **{len(candidate_cameras)}** candidate views for manual selection ({_source}).")
     return candidate_cameras, candidate_dirs, candidate_dists, candidate_imgs
 
 
@@ -313,7 +334,6 @@ def camera_picker_ui(candidate_imgs):
     ]
     _rows = [mo.hstack(_cells[i:i + 6]) for i in range(0, len(_cells), 6)]
     mo.vstack([mo.md("Tick the views that show the scene well:"), *_rows])
-
     return (camera_checkboxes,)
 
 
@@ -321,8 +341,28 @@ def camera_picker_ui(candidate_imgs):
 def confirm_selection():
     confirm_btn = mo.ui.run_button(label="Confirm camera selection & continue")
     confirm_btn
-
     return (confirm_btn,)
+
+
+@app.cell
+def colmap_path():
+    colmap_path = mo.ui.text(label="Path to a COLMAP sparse/0 dir with known camera poses (optional)", value="/marimo/data/truck_sparse")
+    colmap_path
+    return (colmap_path,)
+
+
+@app.cell
+def real_cameras_loader(RENDER_SIZE, colmap_path):
+    import os as _os
+    _colmap_dir = colmap_path.value.strip()
+    if _colmap_dir and _os.path.exists(_os.path.join(_colmap_dir, "cameras.bin")):
+        real_cameras, real_view_dirs = gsa.load_colmap_cameras(_colmap_dir, RENDER_SIZE)
+        _status = mo.md(f"Loaded **{len(real_cameras)}** real camera poses from `{_colmap_dir}`.")
+    else:
+        real_cameras, real_view_dirs = None, None
+        _status = mo.md("No COLMAP pose data found -- candidate cameras will be randomly generated.")
+    _status
+    return real_cameras, real_view_dirs
 
 
 if __name__ == "__main__":
