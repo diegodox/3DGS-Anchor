@@ -15,33 +15,20 @@ import marimo
 __generated_with = "0.23.13"
 app = marimo.App(width="medium")
 
-
-@app.cell
-def _():
+with app.setup:
     import marimo as mo
     import torch
     import matplotlib.pyplot as plt
     import gs_anchor as gsa
 
 
-    return gsa, mo, plt, torch
-
-
 @app.cell
-def claude_status(mo):
-    mo.md("""
-    **Claude connected** 🤝 — ready to pair on this notebook.
-    """)
-    return
-
-
-@app.cell
-def hyperparams(mo, torch):
+def hyperparams():
     F_DIM = 32
     K = 10
     VOXEL_SIZE = 2.0
     LR = 1e-2
-    N_ITERS = 15000
+    N_ITERS = 3000
     OPACITY_THRESHOLD = 0.005
     RENDER_SIZE = 96
     N_VIEWS = 16
@@ -63,7 +50,6 @@ def hyperparams(mo, torch):
         - Device = `{DEVICE}`
         """
     )
-
     return (
         DEVICE,
         F_DIM,
@@ -79,29 +65,21 @@ def hyperparams(mo, torch):
 
 
 @app.cell
-def synthetic_data(gsa, mo):
+def synthetic_data():
     gaussians = gsa.make_synthetic_gaussians(n=800, seed=0)
     mo.md(f"Synthetic scene: **{len(gaussians)}** Gaussians.")
     return (gaussians,)
 
 
 @app.cell
-def ply_loader(mo):
+def ply_loader():
     ply_path = mo.ui.text(label="Path to a real trained-3DGS .ply (optional)", value="/marimo/data/truck_point_cloud.ply")
     ply_path
-
     return (ply_path,)
 
 
 @app.cell
-def active_gaussians_selector(
-    DEVICE,
-    SUBSAMPLE_N,
-    gaussians,
-    gsa,
-    mo,
-    ply_path,
-):
+def active_gaussians_selector(DEVICE, SUBSAMPLE_N, gaussians, ply_path):
     _path = ply_path.value.strip() or "/marimo/data/truck_point_cloud.ply"
     if _path:
         _loaded = gsa.load_ply_gaussians(_path)
@@ -112,12 +90,11 @@ def active_gaussians_selector(
         _source = "synthetic"
 
     mo.md(f"Active scene: **{len(active_gaussians)}** Gaussians ({_source}).")
-
     return (active_gaussians,)
 
 
 @app.cell
-def anchors(F_DIM, K, VOXEL_SIZE, active_gaussians, gsa, mo):
+def anchors(F_DIM, K, VOXEL_SIZE, active_gaussians):
     anchors, anchor_coverage_mask = gsa.build_anchors(active_gaussians, VOXEL_SIZE, K, F_DIM)
     _coverage = anchor_coverage_mask.float().mean().item()
     mo.md(
@@ -128,14 +105,7 @@ def anchors(F_DIM, K, VOXEL_SIZE, active_gaussians, gsa, mo):
 
 
 @app.cell
-def cameras_and_targets(
-    N_VIEWS,
-    RENDER_SIZE,
-    active_gaussians,
-    gsa,
-    mo,
-    torch,
-):
+def cameras_and_targets(N_VIEWS, RENDER_SIZE, active_gaussians):
     _scene_centroid = active_gaussians.positions.mean(dim=0)
     _scene_radius = 3.0 * active_gaussians.positions.std(dim=0).norm().clamp_min(0.5)
     cameras, camera_view_dirs = gsa.make_synthetic_cameras(
@@ -151,7 +121,7 @@ def cameras_and_targets(
 
 
 @app.cell
-def models(DEVICE, F_DIM, K, gsa, mo):
+def models(DEVICE, F_DIM, K):
     opacity_mlp = gsa.OpacityMLP(F_DIM, K).to(DEVICE)
     color_mlp = gsa.ColorMLP(F_DIM, K).to(DEVICE)
     cov_mlp = gsa.CovMLP(F_DIM, K).to(DEVICE)
@@ -160,7 +130,6 @@ def models(DEVICE, F_DIM, K, gsa, mo):
         f"Instantiated `opacity_mlp`, `color_mlp`, `cov_mlp` "
         f"(feature dim {F_DIM}, {K} neighbors per anchor) on `{DEVICE}`."
     )
-
     return color_mlp, cov_mlp, opacity_mlp
 
 
@@ -174,8 +143,6 @@ def training_loop(
     cameras,
     color_mlp,
     cov_mlp,
-    gsa,
-    mo,
     opacity_mlp,
     target_renders,
 ):
@@ -197,10 +164,7 @@ def final_decode(
     anchors,
     color_mlp,
     cov_mlp,
-    gsa,
-    mo,
     opacity_mlp,
-    torch,
 ):
     CANONICAL_VIEW_DIR = torch.tensor([0.0, 0.0, 1.0], device=DEVICE)
 
@@ -216,7 +180,6 @@ def final_decode(
         f"`{CANONICAL_VIEW_DIR.tolist()}`): **{len(reconstructed)}** Gaussians "
         f"survive the opacity threshold (from {len(anchors) * K} candidates)."
     )
-
     return (reconstructed,)
 
 
@@ -226,9 +189,7 @@ def verification_metrics(
     active_gaussians,
     anchors,
     cameras,
-    gsa,
     loss_history,
-    mo,
     reconstructed,
     target_renders,
 ):
@@ -256,12 +217,9 @@ def visualization(
     active_gaussians,
     anchors,
     cameras,
-    gsa,
     loss_history,
-    plt,
     reconstructed,
     target_renders,
-    torch,
 ):
     def plot_comparison(original, reconstructed, anchors, cameras, target_renders, loss_history):
         fig = plt.figure(figsize=(11, 6))
@@ -305,7 +263,6 @@ def visualization(
 
 
     plot_comparison(active_gaussians, reconstructed, anchors, cameras, target_renders, loss_history)
-
     return
 
 
