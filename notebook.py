@@ -246,13 +246,13 @@ def build_anchors_cell(
         anchor_scaling_init = torch.full((M, 3), voxel_size / 2)
         coverage_mask = torch.zeros(M, k, dtype=torch.bool)
 
-        _g = torch.Generator().manual_seed(0)
+        rng = torch.Generator().manual_seed(0)
         for m in range(M):
             start = int(starts[m])
             count = int(counts[m])
             idxs = order[start:start + count]
             if count > k:
-                perm = torch.randperm(count, generator=_g)[:k]
+                perm = torch.randperm(count, generator=rng)[:k]
                 idxs = idxs[perm]
             n_assigned = idxs.shape[0]
             if n_assigned == 0:
@@ -542,10 +542,10 @@ def training_loop(
         optimizer = torch.optim.Adam(params, lr=lr)
         loss_history = []
         n_views = len(cameras)
-        _g = torch.Generator().manual_seed(0)
+        rng = torch.Generator().manual_seed(0)
 
         for it in range(n_iters):
-            view_idx = torch.randint(0, n_views, (1,), generator=_g).item()
+            view_idx = torch.randint(0, n_views, (1,), generator=rng).item()
             cam = cameras[view_idx]
             view_dir = camera_view_dirs[view_idx]
             target_img = target_renders[view_idx]
@@ -616,18 +616,23 @@ def verification_metrics(
     target_renders,
     torch,
 ):
-    with torch.no_grad():
-        _recon_renders = [render(reconstructed, cam) for cam in cameras]
-        _l1_per_view = [F.l1_loss(r, t).item() for r, t in zip(_recon_renders, target_renders)]
-        _l2_per_view = [F.mse_loss(r, t).item() for r, t in zip(_recon_renders, target_renders)]
+    def photometric_error_stats(gaussians, cameras, targets):
+        with torch.no_grad():
+            renders = [render(gaussians, cam) for cam in cameras]
+        l1 = [F.l1_loss(r, t).item() for r, t in zip(renders, targets)]
+        l2 = [F.mse_loss(r, t).item() for r, t in zip(renders, targets)]
+        return sum(l1) / len(l1), sum(l2) / len(l2)
+
+
+    mean_l1, mean_mse = photometric_error_stats(reconstructed, cameras, target_renders)
 
     metrics = {
         "original Gaussians (N)": len(active_gaussians),
         "anchors (M)": len(anchors),
         "max candidates (M*K)": len(anchors) * K,
         "reconstructed Gaussians (N')": len(reconstructed),
-        "mean photometric L1 across views": sum(_l1_per_view) / len(_l1_per_view),
-        "mean photometric MSE across views": sum(_l2_per_view) / len(_l2_per_view),
+        "mean photometric L1 across views": mean_l1,
+        "mean photometric MSE across views": mean_mse,
         "final training loss": loss_history[-1],
     }
 
@@ -651,44 +656,48 @@ def visualization(
     target_renders,
     torch,
 ):
-    _fig = plt.figure(figsize=(11, 6))
+    def plot_comparison(original, reconstructed, anchors, cameras, target_renders, loss_history):
+        fig = plt.figure(figsize=(11, 6))
 
-    _ax1 = _fig.add_subplot(2, 3, 1, projection="3d")
-    _orig_pos = active_gaussians.positions.detach().numpy()
-    _orig_col = torch.sigmoid(active_gaussians.sh_dc).detach().numpy()
-    _ax1.scatter(_orig_pos[:, 0], _orig_pos[:, 1], _orig_pos[:, 2], c=_orig_col, s=4)
-    _ax1.set_title("Original (standard 3DGS)")
+        ax1 = fig.add_subplot(2, 3, 1, projection="3d")
+        orig_pos = original.positions.detach().numpy()
+        orig_col = torch.sigmoid(original.sh_dc).detach().numpy()
+        ax1.scatter(orig_pos[:, 0], orig_pos[:, 1], orig_pos[:, 2], c=orig_col, s=4)
+        ax1.set_title("Original (standard 3DGS)")
 
-    _ax2 = _fig.add_subplot(2, 3, 2, projection="3d")
-    _recon_pos = reconstructed.positions.detach().numpy()
-    _recon_col = torch.sigmoid(reconstructed.sh_dc).detach().numpy()
-    _ax2.scatter(_recon_pos[:, 0], _recon_pos[:, 1], _recon_pos[:, 2], c=_recon_col, s=4)
-    _ax2.set_title("Reconstructed (from anchors)")
+        ax2 = fig.add_subplot(2, 3, 2, projection="3d")
+        recon_pos = reconstructed.positions.detach().numpy()
+        recon_col = torch.sigmoid(reconstructed.sh_dc).detach().numpy()
+        ax2.scatter(recon_pos[:, 0], recon_pos[:, 1], recon_pos[:, 2], c=recon_col, s=4)
+        ax2.set_title("Reconstructed (from anchors)")
 
-    _ax3 = _fig.add_subplot(2, 3, 3, projection="3d")
-    _anchor_pos = anchors.anchor_positions.detach().numpy()
-    _ax3.scatter(_anchor_pos[:, 0], _anchor_pos[:, 1], _anchor_pos[:, 2], c="gray", s=8)
-    _ax3.set_title(f"Anchors (M={len(anchors)})")
+        ax3 = fig.add_subplot(2, 3, 3, projection="3d")
+        anchor_pos = anchors.anchor_positions.detach().numpy()
+        ax3.scatter(anchor_pos[:, 0], anchor_pos[:, 1], anchor_pos[:, 2], c="gray", s=8)
+        ax3.set_title(f"Anchors (M={len(anchors)})")
 
-    _ax4 = _fig.add_subplot(2, 3, 4)
-    _ax4.plot(loss_history)
-    _ax4.set_title("Training loss (photometric L1)")
-    _ax4.set_xlabel("iteration")
+        ax4 = fig.add_subplot(2, 3, 4)
+        ax4.plot(loss_history)
+        ax4.set_title("Training loss (photometric L1)")
+        ax4.set_xlabel("iteration")
 
-    _ax5 = _fig.add_subplot(2, 3, 5)
-    _ax5.imshow(target_renders[0].detach().numpy())
-    _ax5.set_title("Target render (view 0)")
-    _ax5.axis("off")
+        ax5 = fig.add_subplot(2, 3, 5)
+        ax5.imshow(target_renders[0].detach().numpy())
+        ax5.set_title("Target render (view 0)")
+        ax5.axis("off")
 
-    _ax6 = _fig.add_subplot(2, 3, 6)
-    with torch.no_grad():
-        _recon_view0 = render(reconstructed, cameras[0])
-    _ax6.imshow(_recon_view0.detach().numpy())
-    _ax6.set_title("Reconstructed render (view 0)")
-    _ax6.axis("off")
+        ax6 = fig.add_subplot(2, 3, 6)
+        with torch.no_grad():
+            recon_view0 = render(reconstructed, cameras[0])
+        ax6.imshow(recon_view0.detach().numpy())
+        ax6.set_title("Reconstructed render (view 0)")
+        ax6.axis("off")
 
-    _fig.tight_layout()
-    _fig
+        fig.tight_layout()
+        return fig
+
+
+    plot_comparison(active_gaussians, reconstructed, anchors, cameras, target_renders, loss_history)
 
     return
 
