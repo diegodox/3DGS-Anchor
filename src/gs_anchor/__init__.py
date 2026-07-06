@@ -1,4 +1,4 @@
-from .anchors import build_anchors
+from .anchors import build_anchors, choose_voxel_size
 from .colmap_io import load_colmap_cameras
 from .gaussians import (
     AnchorCloud,
@@ -23,6 +23,7 @@ __all__ = [
     "load_colmap_cameras",
     "load_ply_gaussians",
     "build_anchors",
+    "choose_voxel_size",
     "render",
     "look_at_camera",
     "make_synthetic_cameras",

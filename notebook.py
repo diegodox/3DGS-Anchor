@@ -31,9 +31,7 @@ with app.setup:
 def hyperparams():
     F_DIM = 32
     K = 10
-    VOXEL_SIZE = 2.0
-    LR = 1e-2
-    N_ITERS = 3000
+    N_ITERS = 20000
     OPACITY_THRESHOLD = 0.005
     RENDER_SIZE = 96
     N_VIEWS = 24
@@ -45,8 +43,6 @@ def hyperparams():
 
         - Anchor feature dim `F_DIM` = {F_DIM}
         - Neighbors per anchor `K` = {K}
-        - Voxel size = {VOXEL_SIZE}
-        - Learning rate = {LR}
         - Training iterations = {N_ITERS}
         - Final opacity threshold = {OPACITY_THRESHOLD}
         - Render resolution = {RENDER_SIZE}x{RENDER_SIZE}
@@ -54,17 +50,7 @@ def hyperparams():
         - Device = `{DEVICE}`
         """
     )
-    return (
-        DEVICE,
-        F_DIM,
-        K,
-        LR,
-        N_ITERS,
-        N_VIEWS,
-        OPACITY_THRESHOLD,
-        RENDER_SIZE,
-        VOXEL_SIZE,
-    )
+    return DEVICE, F_DIM, K, N_ITERS, N_VIEWS, OPACITY_THRESHOLD, RENDER_SIZE
 
 
 @app.cell
@@ -96,12 +82,13 @@ def active_gaussians_selector(DEVICE, gaussians, ply_path):
 
 
 @app.cell
-def anchors(F_DIM, K, VOXEL_SIZE, active_gaussians):
+def anchors(F_DIM, K, active_gaussians):
+    VOXEL_SIZE = gsa.choose_voxel_size(active_gaussians.positions, K, target_ratio=1.0)
     anchors, anchor_coverage_mask = gsa.build_anchors(active_gaussians, VOXEL_SIZE, K, F_DIM)
     _coverage = anchor_coverage_mask.float().mean().item()
     mo.md(
         f"Built **{len(anchors)}** anchors from {len(active_gaussians)} Gaussians "
-        f"(voxel size {VOXEL_SIZE}). Neighbor-slot coverage at init: {_coverage:.1%}."
+        f"(voxel size {VOXEL_SIZE:.4f}, chosen so M*K ≈ N). Neighbor-slot coverage at init: {_coverage:.1%}."
     )
     return (anchors,)
 
@@ -152,7 +139,6 @@ def models(DEVICE, F_DIM, K):
 @app.cell
 def training_loop(
     CANONICAL_DISTANCE,
-    LR,
     N_ITERS,
     anchors,
     camera_view_dirs,
@@ -165,7 +151,7 @@ def training_loop(
     loss_history, psnr_history = gsa.train(
         anchors, opacity_mlp, color_mlp, cov_mlp,
         cameras, camera_view_dirs, target_renders,
-        CANONICAL_DISTANCE, N_ITERS, LR,
+        CANONICAL_DISTANCE, N_ITERS,
     )
     mo.md(
         f"Training done. Final loss: **{loss_history[-1]:.5f}**, "
