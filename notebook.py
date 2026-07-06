@@ -33,7 +33,7 @@ def hyperparams():
     K = 10
     N_ITERS = 20000
     OPACITY_THRESHOLD = 0.005
-    RENDER_SIZE = 96
+    RENDER_SIZE = 512
     N_VIEWS = 24
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     mo.md(
@@ -199,7 +199,7 @@ def verification_metrics(
     reconstructed,
     target_renders,
 ):
-    mean_l1, mean_mse, mean_psnr = gsa.photometric_error_stats(reconstructed, cameras, target_renders)
+    mean_l1, mean_mse, mean_psnr, mean_ssim = gsa.photometric_error_stats(reconstructed, cameras, target_renders)
 
     metrics = {
         "original Gaussians (N)": len(active_gaussians),
@@ -209,6 +209,7 @@ def verification_metrics(
         "mean photometric L1 across views": mean_l1,
         "mean photometric MSE across views": mean_mse,
         "mean PSNR across views (dB)": mean_psnr,
+        "mean SSIM across views": mean_ssim,
         "final training PSNR (dB)": psnr_history[-1],
         "final training loss": loss_history[-1],
     }
