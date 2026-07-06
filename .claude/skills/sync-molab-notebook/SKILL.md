@@ -41,8 +41,10 @@ direction:
 - Python 3 (project uses `uv`; `uv run python ...` works from repo root).
 - The sibling `marimo-pair` skill must be present at
   `.claude/skills/marimo-pair/scripts/execute-code.sh` (this driver shells
-  out to it for all live-session communication — see that skill for
-  starting/discovering a session).
+  out to it for all live-session communication). To start a brand-new
+  session and get its URL/token, use `.claude/skills/molab-launch-session/`
+  first; `marimo-pair` covers only executing code once you have a URL/token
+  in hand.
 - The molab session URL, and its auth token if the session requires one
   (same as `marimo-pair`: prefer `MARIMO_TOKEN` env, or pass `--token`).
 

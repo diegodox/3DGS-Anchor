@@ -18,6 +18,9 @@ dependencies = [
     "nvidia-nvvm==13.0.*",
 ]
 
+[dependency-groups]
+molab = ["playwright>=1.48"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

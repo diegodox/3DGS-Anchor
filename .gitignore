@@ -1,0 +1,9 @@
+# molab-launch-session output (contains a live session bearer token) and debug artifacts
+.molab/
+
+# Python
+__pycache__/
+*.pyc
+
+# uv/venv
+.venv/
