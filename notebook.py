@@ -37,7 +37,6 @@ def hyperparams():
     OPACITY_THRESHOLD = 0.005
     RENDER_SIZE = 96
     N_CANDIDATES = 24
-    SUBSAMPLE_N = 30000
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     mo.md(
         f"""
@@ -52,7 +51,6 @@ def hyperparams():
         - Final opacity threshold = {OPACITY_THRESHOLD}
         - Render resolution = {RENDER_SIZE}x{RENDER_SIZE}
         - Candidate camera views to generate = {N_CANDIDATES}
-        - Real-data subsample count = {SUBSAMPLE_N}
         - Device = `{DEVICE}`
         """
     )
@@ -65,7 +63,6 @@ def hyperparams():
         N_ITERS,
         OPACITY_THRESHOLD,
         RENDER_SIZE,
-        SUBSAMPLE_N,
         VOXEL_SIZE,
     )
 
@@ -85,12 +82,11 @@ def ply_loader():
 
 
 @app.cell
-def active_gaussians_selector(DEVICE, SUBSAMPLE_N, gaussians, ply_path):
+def active_gaussians_selector(DEVICE, gaussians, ply_path):
     _path = ply_path.value.strip() or "/marimo/data/truck_point_cloud.ply"
     if _path:
-        _loaded = gsa.load_ply_gaussians(_path)
-        active_gaussians = gsa.subsample_gaussians(_loaded, SUBSAMPLE_N, mode="topk_opacity").to(DEVICE)
-        _source = f"loaded from `{_path}` ({len(_loaded)} -> {len(active_gaussians)} after subsample)"
+        active_gaussians = gsa.load_ply_gaussians(_path).to(DEVICE)
+        _source = f"loaded from `{_path}` ({len(active_gaussians)} Gaussians, no crop, no subsample)"
     else:
         active_gaussians = gaussians.to(DEVICE)
         _source = "synthetic"
