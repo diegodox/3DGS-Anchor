@@ -36,7 +36,7 @@ def hyperparams():
     N_ITERS = 3000
     OPACITY_THRESHOLD = 0.005
     RENDER_SIZE = 96
-    N_CANDIDATES = 24
+    N_VIEWS = 24
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     mo.md(
         f"""
@@ -50,7 +50,7 @@ def hyperparams():
         - Training iterations = {N_ITERS}
         - Final opacity threshold = {OPACITY_THRESHOLD}
         - Render resolution = {RENDER_SIZE}x{RENDER_SIZE}
-        - Candidate camera views to generate = {N_CANDIDATES}
+        - Synthetic-fallback view count `N_VIEWS` = {N_VIEWS}
         - Device = `{DEVICE}`
         """
     )
@@ -59,8 +59,8 @@ def hyperparams():
         F_DIM,
         K,
         LR,
-        N_CANDIDATES,
         N_ITERS,
+        N_VIEWS,
         OPACITY_THRESHOLD,
         RENDER_SIZE,
         VOXEL_SIZE,
@@ -108,22 +108,31 @@ def anchors(F_DIM, K, VOXEL_SIZE, active_gaussians):
 
 @app.cell
 def cameras_and_targets(
-    camera_checkboxes,
-    candidate_cameras,
-    candidate_dirs,
-    candidate_dists,
-    candidate_imgs,
+    N_VIEWS,
+    RENDER_SIZE,
+    active_gaussians,
+    real_cameras,
+    real_view_dirs,
 ):
-    _selected = [i for i, v in enumerate(camera_checkboxes.value) if v]
-    if not _selected:
-        _selected = list(range(len(candidate_imgs)))
+    if real_cameras is not None:
+        cameras = real_cameras
+        camera_view_dirs = real_view_dirs.to(active_gaussians.positions.device)
+        _centroid_cpu = active_gaussians.positions.mean(dim=0).cpu()
+        CANONICAL_DISTANCE = float(torch.stack([
+            (-cam.R.T @ cam.t - _centroid_cpu).norm() for cam in cameras
+        ]).mean())
+        _source = f"{len(cameras)} real camera poses (COLMAP)"
+    else:
+        cameras, camera_view_dirs, _dists = gsa.make_random_cameras(
+            active_gaussians.positions, N_VIEWS, RENDER_SIZE, seed=0
+        )
+        CANONICAL_DISTANCE = float(_dists.mean())
+        _source = f"{len(cameras)} randomly generated cameras"
 
-    cameras = [candidate_cameras[i] for i in _selected]
-    camera_view_dirs = torch.stack([candidate_dirs[i] for i in _selected])
-    target_renders = [candidate_imgs[i] for i in _selected]
-    CANONICAL_DISTANCE = float(torch.stack([candidate_dists[i] for i in _selected]).mean())
+    with torch.no_grad():
+        target_renders = [gsa.render(active_gaussians, cam) for cam in cameras]
 
-    mo.md(f"Using **{len(cameras)}** selected camera(s) ({len(candidate_imgs)} candidates offered).")
+    mo.md(f"Using **{_source}** for training (canonical distance {CANONICAL_DISTANCE:.2f}).")
     return CANONICAL_DISTANCE, camera_view_dirs, cameras, target_renders
 
 
@@ -149,20 +158,20 @@ def training_loop(
     camera_view_dirs,
     cameras,
     color_mlp,
-    confirm_btn,
     cov_mlp,
     opacity_mlp,
     target_renders,
 ):
-    mo.stop(not confirm_btn.value, mo.md("Tick your chosen camera views above, then click **Confirm camera selection & continue** to train."))
-
-    loss_history = gsa.train(
+    loss_history, psnr_history = gsa.train(
         anchors, opacity_mlp, color_mlp, cov_mlp,
         cameras, camera_view_dirs, target_renders,
         CANONICAL_DISTANCE, N_ITERS, LR,
     )
-    mo.md(f"Training done. Final loss: **{loss_history[-1]:.5f}** (started at {loss_history[0]:.5f}).")
-    return (loss_history,)
+    mo.md(
+        f"Training done. Final loss: **{loss_history[-1]:.5f}**, "
+        f"final PSNR: **{psnr_history[-1]:.2f} dB** (started at loss {loss_history[0]:.5f})."
+    )
+    return loss_history, psnr_history
 
 
 @app.cell
@@ -173,12 +182,9 @@ def final_decode(
     OPACITY_THRESHOLD,
     anchors,
     color_mlp,
-    confirm_btn,
     cov_mlp,
     opacity_mlp,
 ):
-    mo.stop(not confirm_btn.value)
-
     CANONICAL_VIEW_DIR = torch.tensor([0.0, 0.0, 1.0], device=DEVICE)
 
     with torch.no_grad():
@@ -203,10 +209,11 @@ def verification_metrics(
     anchors,
     cameras,
     loss_history,
+    psnr_history,
     reconstructed,
     target_renders,
 ):
-    mean_l1, mean_mse = gsa.photometric_error_stats(reconstructed, cameras, target_renders)
+    mean_l1, mean_mse, mean_psnr = gsa.photometric_error_stats(reconstructed, cameras, target_renders)
 
     metrics = {
         "original Gaussians (N)": len(active_gaussians),
@@ -215,6 +222,8 @@ def verification_metrics(
         "reconstructed Gaussians (N')": len(reconstructed),
         "mean photometric L1 across views": mean_l1,
         "mean photometric MSE across views": mean_mse,
+        "mean PSNR across views (dB)": mean_psnr,
+        "final training PSNR (dB)": psnr_history[-1],
         "final training loss": loss_history[-1],
     }
 
@@ -231,10 +240,11 @@ def visualization(
     anchors,
     cameras,
     loss_history,
+    psnr_history,
     reconstructed,
     target_renders,
 ):
-    def plot_comparison(original, reconstructed, anchors, cameras, target_renders, loss_history):
+    def plot_comparison(original, reconstructed, anchors, cameras, target_renders, loss_history, psnr_history):
         fig = plt.figure(figsize=(11, 6))
 
         ax1 = fig.add_subplot(2, 3, 1, projection="3d")
@@ -255,9 +265,13 @@ def visualization(
         ax3.set_title(f"Anchors (M={len(anchors)})")
 
         ax4 = fig.add_subplot(2, 3, 4)
-        ax4.plot(loss_history)
-        ax4.set_title("Training loss (photometric L1)")
+        ax4.plot(loss_history, color="tab:blue")
+        ax4.set_title("Training loss (L1) / PSNR")
         ax4.set_xlabel("iteration")
+        ax4.set_ylabel("L1 loss", color="tab:blue")
+        ax4b = ax4.twinx()
+        ax4b.plot(psnr_history, color="tab:orange", alpha=0.6)
+        ax4b.set_ylabel("PSNR (dB)", color="tab:orange")
 
         ax5 = fig.add_subplot(2, 3, 5)
         ax5.imshow(target_renders[0].detach().cpu().numpy())
@@ -275,69 +289,8 @@ def visualization(
         return fig
 
 
-    plot_comparison(active_gaussians, reconstructed, anchors, cameras, target_renders, loss_history)
+    plot_comparison(active_gaussians, reconstructed, anchors, cameras, target_renders, loss_history, psnr_history)
     return
-
-
-@app.cell
-def camera_candidates(
-    N_CANDIDATES,
-    RENDER_SIZE,
-    active_gaussians,
-    real_cameras,
-    real_view_dirs,
-):
-    import random as _random
-
-    if real_cameras is not None:
-        _rng = _random.Random(0)
-        _idx = _rng.sample(range(len(real_cameras)), min(N_CANDIDATES, len(real_cameras)))
-        candidate_cameras = [real_cameras[i] for i in _idx]
-        candidate_dirs = torch.stack([real_view_dirs[i] for i in _idx]).to(active_gaussians.positions.device)
-        _centroid_cpu = active_gaussians.positions.mean(dim=0).cpu()
-        candidate_dists = torch.stack([
-            (-cam.R.T @ cam.t - _centroid_cpu).norm() for cam in candidate_cameras
-        ])
-        _source = "real camera poses"
-    else:
-        candidate_cameras, candidate_dirs, candidate_dists = gsa.make_random_cameras(
-            active_gaussians.positions, N_CANDIDATES, RENDER_SIZE, seed=0
-        )
-        _source = "randomly generated"
-
-    with torch.no_grad():
-        candidate_imgs = [gsa.render(active_gaussians, cam) for cam in candidate_cameras]
-
-    mo.md(f"Rendered **{len(candidate_cameras)}** candidate views for manual selection ({_source}).")
-    return candidate_cameras, candidate_dirs, candidate_dists, candidate_imgs
-
-
-@app.cell
-def camera_picker_ui(candidate_imgs):
-    def _thumb(img):
-        fig, ax = plt.subplots(figsize=(1.4, 1.4))
-        ax.imshow(img.detach().cpu().numpy())
-        ax.axis("off")
-        plt.close(fig)
-        return fig
-
-    camera_checkboxes = mo.ui.array(
-        [mo.ui.checkbox(label=f"#{i}") for i in range(len(candidate_imgs))]
-    )
-    _cells = [
-        mo.vstack([_thumb(img), camera_checkboxes[i]])
-        for i, img in enumerate(candidate_imgs)
-    ]
-    _rows = [mo.hstack(_cells[i:i + 6]) for i in range(0, len(_cells), 6)]
-    mo.vstack([mo.md("Tick the views that show the scene well:"), *_rows])
-    return (camera_checkboxes,)
-
-
-@app.cell
-def confirm_selection():
-    confirm_btn = mo.ui.run_button(label="Confirm camera selection & continue")
-    confirm_btn
-    return (confirm_btn,)
 
 
 @app.cell
